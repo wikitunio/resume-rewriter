@@ -8,6 +8,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import markdown
 from fpdf import FPDF
+import io
+import re
 
 # --- Initialize Groq Client ---
 try:
@@ -18,11 +20,22 @@ except KeyError:
     st.stop()
 
 # --- Helper Functions ---
+def sanitize_text_for_fpdf(text):
+    """Replaces Unicode characters with FPDF-safe Latin-1 equivalents."""
+    replacements = {
+        '•': '-', '–': '-', '—': '-',
+        '‘': "'", '’': "'",
+        '“': '"', '”': '"',
+        '…': '...', '✓': 'v'
+    }
+    for search, replace in replacements.items():
+        text = text.replace(search, replace)
+    # Drop any remaining unsupported characters safely
+    return text.encode('latin-1', 'ignore').decode('latin-1')
+
 def extract_text_from_file(uploaded_file):
-    """Extracts text from PDF, DOCX, or TXT files."""
     text = ""
     file_extension = uploaded_file.name.split('.')[-1].lower()
-    
     try:
         if file_extension == 'pdf':
             with pdfplumber.open(uploaded_file) as pdf:
@@ -38,43 +51,32 @@ def extract_text_from_file(uploaded_file):
             text = uploaded_file.read().decode('utf-8')
     except Exception as e:
         st.error(f"Error reading file: {e}")
-        
     return text
 
 def scrape_job_description(url):
-    """Fetches and cleans visible text from a job posting URL."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, "html.parser")
         for element in soup(["script", "style", "header", "footer", "nav", "noscript", "svg"]):
             element.decompose()
-            
         text = soup.get_text(separator="\n")
         lines = (line.strip() for line in text.splitlines())
-        clean_text = "\n".join(chunk for chunk in lines if chunk)
-        
-        return clean_text
+        return "\n".join(chunk for chunk in lines if chunk)
     except Exception as e:
         st.error(f"Failed to extract job description from URL: {e}")
         return None
 
 def calculate_ats_score(resume_text, job_description):
-    """Calculates a Cosine Similarity percentage between the CV and Job Description."""
     if not resume_text.strip() or not job_description.strip():
         return 0.0
-        
     vectorizer = TfidfVectorizer(stop_words='english')
     vectors = vectorizer.fit_transform([resume_text, job_description])
     similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Sends the data to the newly recommended Groq model for intelligent CV rewriting."""
     prompt = f"""
     You are an expert ATS resume writer. 
     I will provide my current resume and a job description.
@@ -92,7 +94,6 @@ def optimize_resume(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    
     completion = client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
@@ -101,7 +102,6 @@ def optimize_resume(resume_text, job_description):
     return completion.choices[0].message.content
 
 def generate_cover_letter(resume_text, job_description):
-    """Generates a highly natural, human-sounding cover letter via Groq."""
     prompt = f"""
     Write a professional, authentic, and highly human-sounding cover letter based on the applicant's resume and the job description.
     
@@ -119,7 +119,6 @@ def generate_cover_letter(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    
     completion = client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
@@ -127,27 +126,66 @@ def generate_cover_letter(resume_text, job_description):
     )
     return completion.choices[0].message.content
 
+# --- PDF Generators ---
 def create_pdf_from_markdown(md_text):
-    """Converts simple Markdown to PDF using fpdf2."""
-    html_content = markdown.markdown(md_text)
-    
+    clean_md = sanitize_text_for_fpdf(md_text)
+    html_content = markdown.markdown(clean_md)
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("helvetica", size=11)
-    
     pdf.write_html(html_content)
     return bytes(pdf.output())
 
 def create_pdf_from_text(plain_text):
-    """Creates a basic PDF for the cover letter."""
+    clean_text = sanitize_text_for_fpdf(plain_text)
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("helvetica", size=11)
-    
-    clean_text = plain_text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 6, clean_text)
-    
     return bytes(pdf.output())
+
+# --- Word (.docx) Generators ---
+def _add_formatted_runs(paragraph, text):
+    """Helper to apply bold formatting inside Word paragraphs."""
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            paragraph.add_run(part[2:-2]).bold = True
+        else:
+            paragraph.add_run(part)
+
+def create_docx_from_markdown(md_text):
+    doc = docx.Document()
+    for line in md_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('# '):
+            doc.add_heading(line[2:].strip(), level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line[4:].strip(), level=3)
+        elif line.startswith('- ') or line.startswith('* ') or line.startswith('• '):
+            p = doc.add_paragraph(style='List Bullet')
+            _add_formatted_runs(p, line[2:].strip())
+        else:
+            p = doc.add_paragraph()
+            _add_formatted_runs(p, line)
+            
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+def create_docx_from_text(plain_text):
+    doc = docx.Document()
+    for paragraph in plain_text.split('\n\n'):
+        if paragraph.strip():
+            doc.add_paragraph(paragraph.strip())
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
 
 # --- Streamlit Frontend ---
 st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide")
@@ -156,7 +194,6 @@ st.title("CV Optimizer & Cover Letter Generator")
 st.markdown("Powered by the ultra-fast **Groq API**")
 
 option = st.radio("Choose Job Description Input Method:", ["Paste Job Description Text", "Paste Job Posting Link (URL)"])
-
 job_desc = ""
 
 if option == "Paste Job Description Text":
@@ -184,45 +221,62 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
         if not raw_resume_text.strip():
             st.error("Could not extract text from this file. It might be an empty file or a scanned image.")
         else:
-            # 1. Baseline Score
             original_score = calculate_ats_score(raw_resume_text, job_desc)
             st.info(f"Baseline ATS Match Score: **{original_score}%**")
             
             try:
-                # 2. AI Generation - Resume
+                # AI Generation
                 with st.spinner("AI is analyzing keywords and rewriting your CV..."):
                     optimized_markdown = optimize_resume(raw_resume_text, job_desc)
                     new_score = calculate_ats_score(optimized_markdown, job_desc)
                     st.success(f"New ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
                 
-                # 3. AI Generation - Cover Letter
                 with st.spinner("Drafting your Cover Letter..."):
                     cover_letter_text = generate_cover_letter(raw_resume_text, job_desc)
                 
                 st.markdown("---")
                 
-                # 4. Display in Tabs
+                # UI Tabs
                 tab1, tab2 = st.tabs(["📝 Tailored CV", "✉️ Professional Cover Letter"])
                 
                 with tab1:
                     st.markdown(optimized_markdown)
-                    pdf_cv = create_pdf_from_markdown(optimized_markdown)
-                    st.download_button(
-                        label="⬇️ Download Optimized CV as PDF",
-                        data=pdf_cv,
-                        file_name="Optimized_ATS_Resume.pdf",
-                        mime="application/pdf"
-                    )
                     
+                    # Layout download buttons side-by-side
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            label="⬇️ Download CV as PDF",
+                            data=create_pdf_from_markdown(optimized_markdown),
+                            file_name="Optimized_ATS_Resume.pdf",
+                            mime="application/pdf"
+                        )
+                    with col2:
+                        st.download_button(
+                            label="⬇️ Download CV as Word (.docx)",
+                            data=create_docx_from_markdown(optimized_markdown),
+                            file_name="Optimized_ATS_Resume.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+                        
                 with tab2:
                     st.markdown(cover_letter_text)
-                    pdf_cl = create_pdf_from_text(cover_letter_text)
-                    st.download_button(
-                        label="⬇️ Download Cover Letter as PDF",
-                        data=pdf_cl,
-                        file_name="Cover_Letter.pdf",
-                        mime="application/pdf"
-                    )
                     
+                    col3, col4 = st.columns(2)
+                    with col3:
+                        st.download_button(
+                            label="⬇️ Download Cover Letter as PDF",
+                            data=create_pdf_from_text(cover_letter_text),
+                            file_name="Cover_Letter.pdf",
+                            mime="application/pdf"
+                        )
+                    with col4:
+                        st.download_button(
+                            label="⬇️ Download Cover Letter as Word (.docx)",
+                            data=create_docx_from_text(cover_letter_text),
+                            file_name="Cover_Letter.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+                        
             except Exception as e:
                 st.error(f"An error occurred during AI processing: {e}")
