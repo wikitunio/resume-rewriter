@@ -33,25 +33,22 @@ if 'new_score' not in st.session_state:
     st.session_state.new_score = 0.0
 
 # --- Helper Functions ---
-def sanitize_text(text):
-    """Replaces Unicode characters with standard equivalents."""
+def make_text_safe_for_pdf(text):
+    """Aggressively sanitizes text to prevent FPDF from crashing."""
+    # 1. Replace unsupported Unicode characters with standard Latin-1 equivalents
     replacements = {
         '•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '✓': 'v'
     }
     for search, replace in replacements.items():
         text = text.replace(search, replace)
-    return text
-
-def safe_wrap_long_words(line, max_length=75):
-    """Breaks abnormally long unbroken strings (like long URLs) to prevent PDF crashes."""
-    words = line.split()
-    safe_words = []
-    for word in words:
-        if len(word) > max_length:
-            safe_words.append(" ".join(word[i:i+max_length] for i in range(0, len(word), max_length)))
-        else:
-            safe_words.append(word)
-    return " ".join(safe_words)
+        
+    # 2. Remove AI-generated markdown dividers (e.g., -------- or ========)
+    text = re.sub(r'[-=*_]{4,}', ' ', text)
+    
+    # 3. Force-wrap ANY unbroken string longer than 45 characters to prevent horizontal space crashes
+    text = re.sub(r'(\S{45})', r'\1 ', text)
+    
+    return text.encode('latin-1', 'ignore').decode('latin-1')
 
 def extract_text_from_file(uploaded_file):
     text = ""
@@ -170,83 +167,51 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     
     return review, final_resume, final_cl
 
-# --- PDF Generators (ATS Formatted) ---
+# --- Crash-Proof PDF Generators ---
 def create_pdf_from_markdown(md_text):
-    md_text = sanitize_text(md_text).encode('latin-1', 'ignore').decode('latin-1')
+    # Aggressively clean the text to prevent PDF crashes
+    safe_md = make_text_safe_for_pdf(md_text)
+    
+    # Convert safe Markdown to HTML
+    html_content = markdown.markdown(safe_md)
+    
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
+    pdf.set_font("helvetica", size=10)
     
-    for line in md_text.split('\n'):
-        line = line.strip()
-        if not line:
-            pdf.ln(3)
-            continue
-            
-        # Stop PDF from crashing on AI-generated horizontal rules (---)
-        if re.match(r'^[-=*_]{3,}$', line):
-            continue
-            
-        line = safe_wrap_long_words(line)
-            
-        if line.startswith('# '):
-            pdf.set_font("helvetica", "B", 14)
-            pdf.set_text_color(33, 53, 71)
-            pdf.multi_cell(0, 8, line[2:])
-            pdf.set_text_color(0, 0, 0)
-        elif line.startswith('## '):
-            pdf.set_font("helvetica", "B", 12)
-            pdf.set_text_color(33, 53, 71)
-            pdf.multi_cell(0, 7, line[3:])
-            pdf.set_text_color(0, 0, 0)
-            pdf.line(15, pdf.get_y(), 195, pdf.get_y()) # Adds a professional underline
-            pdf.ln(2)
-        elif line.startswith('- ') or line.startswith('* '):
-            pdf.set_font("helvetica", "", 10)
-            clean_line = line[2:].replace('**', '') # Strip bold tags for pure text
-            pdf.multi_cell(0, 5, "- " + clean_line)
-        else:
-            pdf.set_font("helvetica", "", 10)
-            clean_line = line.replace('**', '')
-            pdf.multi_cell(0, 5, clean_line)
-            
+    # Use native HTML rendering which safely handles bolding, headers, and lists
+    pdf.write_html(html_content)
+    
     return bytes(pdf.output())
 
 def create_pdf_from_text(plain_text):
-    plain_text = sanitize_text(plain_text).encode('latin-1', 'ignore').decode('latin-1')
+    safe_text = make_text_safe_for_pdf(plain_text)
+    
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(20, 20, 20)
-    pdf.set_font("helvetica", "", 11)
+    pdf.set_font("helvetica", size=11)
     
-    for paragraph in plain_text.split('\n'):
-        paragraph = paragraph.strip()
-        if paragraph:
-            # Stop PDF from crashing on AI-generated horizontal rules
-            if re.match(r'^[-=*_]{3,}$', paragraph):
-                continue
-            paragraph = safe_wrap_long_words(paragraph)
-            pdf.multi_cell(0, 6, paragraph)
+    for paragraph in safe_text.split('\n'):
+        if paragraph.strip():
+            pdf.multi_cell(0, 6, paragraph.strip())
             pdf.ln(2)
+            
     return bytes(pdf.output())
 
-# --- Word (.docx) Generators (ATS Formatted) ---
+# --- Word (.docx) Generators ---
 def create_docx_from_markdown(md_text):
     doc = docx.Document()
     
-    # Set default ATS-friendly font to Arial
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Arial'
     font.size = Pt(10)
     
     for line in md_text.split('\n'):
-        line = sanitize_text(line.strip())
-        if not line:
-            continue
-            
-        # Ignore markdown dividers
-        if re.match(r'^[-=*_]{3,}$', line):
+        line = line.strip()
+        if not line or re.match(r'^[-=*_]{4,}$', line):
             continue
             
         if line.startswith('# '):
@@ -275,12 +240,9 @@ def create_docx_from_text(plain_text):
     font.name = 'Arial'
     font.size = Pt(11)
     
-    plain_text = sanitize_text(plain_text)
     for paragraph in plain_text.split('\n'):
         paragraph = paragraph.strip()
-        if paragraph:
-            if re.match(r'^[-=*_]{3,}$', paragraph):
-                continue
+        if paragraph and not re.match(r'^[-=*_]{4,}$', paragraph):
             doc.add_paragraph(paragraph)
             
     bio = io.BytesIO()
@@ -358,6 +320,7 @@ if st.session_state.generation_complete:
     with tab1:
         st.info("💡 **Tip:** Look for bracketed placeholders like `[Insert Number]` and manually replace them with real metrics before submitting!")
         st.markdown(st.session_state.final_resume)
+        
         col1, col2 = st.columns(2)
         with col1:
             st.download_button(
@@ -376,6 +339,7 @@ if st.session_state.generation_complete:
             
     with tab2:
         st.markdown(st.session_state.final_cover_letter)
+        
         col3, col4 = st.columns(2)
         with col3:
             st.download_button(
