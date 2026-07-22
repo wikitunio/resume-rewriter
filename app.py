@@ -21,7 +21,6 @@ except KeyError:
     st.stop()
 
 # --- Streamlit Session State Initialization ---
-# This prevents the app from wiping data when a download button is clicked
 if 'generation_complete' not in st.session_state:
     st.session_state.generation_complete = False
 if 'final_resume' not in st.session_state:
@@ -42,6 +41,17 @@ def sanitize_text(text):
     for search, replace in replacements.items():
         text = text.replace(search, replace)
     return text
+
+def safe_wrap_long_words(line, max_length=75):
+    """Breaks abnormally long unbroken strings (like long URLs) to prevent PDF crashes."""
+    words = line.split()
+    safe_words = []
+    for word in words:
+        if len(word) > max_length:
+            safe_words.append(" ".join(word[i:i+max_length] for i in range(0, len(word), max_length)))
+        else:
+            safe_words.append(word)
+    return " ".join(safe_words)
 
 def extract_text_from_file(uploaded_file):
     text = ""
@@ -173,6 +183,12 @@ def create_pdf_from_markdown(md_text):
             pdf.ln(3)
             continue
             
+        # Stop PDF from crashing on AI-generated horizontal rules (---)
+        if re.match(r'^[-=*_]{3,}$', line):
+            continue
+            
+        line = safe_wrap_long_words(line)
+            
         if line.startswith('# '):
             pdf.set_font("helvetica", "B", 14)
             pdf.set_text_color(33, 53, 71)
@@ -204,8 +220,13 @@ def create_pdf_from_text(plain_text):
     pdf.set_font("helvetica", "", 11)
     
     for paragraph in plain_text.split('\n'):
-        if paragraph.strip():
-            pdf.multi_cell(0, 6, paragraph.strip())
+        paragraph = paragraph.strip()
+        if paragraph:
+            # Stop PDF from crashing on AI-generated horizontal rules
+            if re.match(r'^[-=*_]{3,}$', paragraph):
+                continue
+            paragraph = safe_wrap_long_words(paragraph)
+            pdf.multi_cell(0, 6, paragraph)
             pdf.ln(2)
     return bytes(pdf.output())
 
@@ -223,6 +244,11 @@ def create_docx_from_markdown(md_text):
         line = sanitize_text(line.strip())
         if not line:
             continue
+            
+        # Ignore markdown dividers
+        if re.match(r'^[-=*_]{3,}$', line):
+            continue
+            
         if line.startswith('# '):
             heading = doc.add_heading(line[2:], level=1)
             heading.runs[0].font.color.rgb = RGBColor(33, 53, 71)
@@ -251,8 +277,11 @@ def create_docx_from_text(plain_text):
     
     plain_text = sanitize_text(plain_text)
     for paragraph in plain_text.split('\n'):
-        if paragraph.strip():
-            doc.add_paragraph(paragraph.strip())
+        paragraph = paragraph.strip()
+        if paragraph:
+            if re.match(r'^[-=*_]{3,}$', paragraph):
+                continue
+            doc.add_paragraph(paragraph)
             
     bio = io.BytesIO()
     doc.save(bio)
@@ -319,7 +348,6 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
                 st.error(f"An error occurred during AI processing: {e}")
 
 # --- Display Results from Session State ---
-# This block runs even after a download button is clicked, preventing UI disappearance
 if st.session_state.generation_complete:
     st.success(f"Final ATS Match Score: **{st.session_state.new_score}%** (An improvement of {round(st.session_state.new_score - st.session_state.original_score, 2)}%)")
     
