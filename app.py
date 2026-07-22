@@ -35,17 +35,16 @@ if 'new_score' not in st.session_state:
 # --- Helper Functions ---
 def make_text_safe_for_pdf(text):
     """Aggressively sanitizes text to prevent FPDF from crashing."""
-    # 1. Replace unsupported Unicode characters with standard Latin-1 equivalents
     replacements = {
         '•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '✓': 'v'
     }
     for search, replace in replacements.items():
         text = text.replace(search, replace)
         
-    # 2. Remove AI-generated markdown dividers (e.g., -------- or ========)
-    text = re.sub(r'[-=*_]{4,}', ' ', text)
+    # Remove AI-generated markdown dividers (3 or more dashes/equals/stars)
+    text = re.sub(r'[-=*_]{3,}', ' ', text)
     
-    # 3. Force-wrap ANY unbroken string longer than 45 characters to prevent horizontal space crashes
+    # Force-wrap ANY unbroken string longer than 45 characters to prevent horizontal space crashes
     text = re.sub(r'(\S{45})', r'\1 ', text)
     
     return text.encode('latin-1', 'ignore').decode('latin-1')
@@ -137,6 +136,7 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     - DO NOT literally write phrases like "Accomplished [X] as measured by [Y]". Write the achievements naturally as a human professional would.
     - DO NOT leave any "(Y)", "(Z)", or "(X)" markers in the text. Remove all structural markers.
     - Do NOT invent fake metrics. If a metric is needed to strengthen a bullet point, insert a clear placeholder like [Insert Number] or [Insert %].
+    - NEVER wrap your output in ```markdown code blocks. Output the raw text directly.
 
     Output your response exactly in this format using these strict delimiters:
 
@@ -165,22 +165,21 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     final_resume = resume_match.group(1).strip() if resume_match else draft_resume
     final_cl = cl_match.group(1).strip() if cl_match else draft_cl
     
+    # BRUTE FORCE FIX: Globally strip all code block markers and markdown backticks anywhere in the text
+    final_resume = final_resume.replace('```markdown', '').replace('```', '').strip()
+    final_cl = final_cl.replace('```markdown', '').replace('```', '').strip()
+    
     return review, final_resume, final_cl
 
 # --- Crash-Proof PDF Generators ---
 def create_pdf_from_markdown(md_text):
-    # Aggressively clean the text to prevent PDF crashes
     safe_md = make_text_safe_for_pdf(md_text)
-    
-    # Convert safe Markdown to HTML
     html_content = markdown.markdown(safe_md)
     
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
     pdf.set_font("helvetica", size=10)
-    
-    # Use native HTML rendering which safely handles bolding, headers, and lists
     pdf.write_html(html_content)
     
     return bytes(pdf.output())
@@ -194,8 +193,10 @@ def create_pdf_from_text(plain_text):
     pdf.set_font("helvetica", size=11)
     
     for paragraph in safe_text.split('\n'):
-        if paragraph.strip():
-            pdf.multi_cell(0, 6, paragraph.strip())
+        paragraph = paragraph.strip()
+        # Ignore lines that are just 3 or more dashes
+        if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
+            pdf.multi_cell(0, 6, paragraph)
             pdf.ln(2)
             
     return bytes(pdf.output())
@@ -211,7 +212,8 @@ def create_docx_from_markdown(md_text):
     
     for line in md_text.split('\n'):
         line = line.strip()
-        if not line or re.match(r'^[-=*_]{4,}$', line):
+        # Globally ignore markdown dividers (3 or more dashes/equals/stars)
+        if not line or re.match(r'^[-=*_]{3,}$', line):
             continue
             
         if line.startswith('# '):
@@ -242,7 +244,8 @@ def create_docx_from_text(plain_text):
     
     for paragraph in plain_text.split('\n'):
         paragraph = paragraph.strip()
-        if paragraph and not re.match(r'^[-=*_]{4,}$', paragraph):
+        # Globally ignore markdown dividers (3 or more dashes/equals/stars)
+        if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
             doc.add_paragraph(paragraph)
             
     bio = io.BytesIO()
@@ -287,18 +290,15 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
             st.info(f"Baseline ATS Match Score: **{original_score}%**")
             
             try:
-                # 1. AI Generation - Drafts
                 with st.spinner("Agent 1: Drafting initial ATS resume..."):
                     draft_markdown = optimize_resume(raw_resume_text, job_desc)
                 
                 with st.spinner("Agent 2: Drafting human-sounding Cover Letter..."):
                     draft_cl = generate_cover_letter(raw_resume_text, job_desc)
                 
-                # 2. AI Expert Review & Finalization
                 with st.spinner("Agent 3: Expert AI is rewriting documents for natural tone and ATS compliance..."):
                     review_feedback, final_resume, final_cover_letter = finalize_documents(draft_markdown, draft_cl, job_desc)
                 
-                # 3. Save to Session State
                 st.session_state.final_resume = final_resume
                 st.session_state.final_cover_letter = final_cover_letter
                 st.session_state.review_feedback = review_feedback
