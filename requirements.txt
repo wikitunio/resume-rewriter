@@ -2,4 +2,8 @@ streamlit
 pdfplumber
 scikit-learn
 google-genai
-markdown-pdf
+markdown
+fpdf2
+requests
+beautifulsoup4
+python-docx
