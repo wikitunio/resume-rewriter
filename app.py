@@ -1,13 +1,13 @@
 import streamlit as st
 import pdfplumber
 import docx
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import requests
 from bs4 import BeautifulSoup
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import markdown
 from fpdf import FPDF
 import io
 import re
@@ -33,22 +33,6 @@ if 'new_score' not in st.session_state:
     st.session_state.new_score = 0.0
 
 # --- Helper Functions ---
-def make_text_safe_for_pdf(text):
-    """Aggressively sanitizes text to prevent FPDF from crashing."""
-    replacements = {
-        '•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '✓': 'v'
-    }
-    for search, replace in replacements.items():
-        text = text.replace(search, replace)
-        
-    # Remove AI-generated markdown dividers (3 or more dashes/equals/stars)
-    text = re.sub(r'[-=*_]{3,}', ' ', text)
-    
-    # Force-wrap ANY unbroken string longer than 45 characters to prevent horizontal space crashes
-    text = re.sub(r'(\S{45})', r'\1 ', text)
-    
-    return text.encode('latin-1', 'ignore').decode('latin-1')
-
 def extract_text_from_file(uploaded_file):
     text = ""
     file_extension = uploaded_file.name.split('.')[-1].lower()
@@ -95,10 +79,7 @@ def calculate_ats_score(resume_text, job_description):
 def optimize_resume(resume_text, job_description):
     prompt = f"""
     You are an expert ATS resume writer. Rewrite the provided resume to match the job description.
-    STRICT RULES:
-    1. Do not invent fake skills or experience.
-    2. Output ONLY the optimized resume in Markdown format. Keep formatting professional and simple.
-    
+    Output ONLY the optimized resume in Markdown format.
     Job Description:\n{job_description}\n\nMy Resume:\n{resume_text}
     """
     completion = client.chat.completions.create(
@@ -111,10 +92,7 @@ def optimize_resume(resume_text, job_description):
 def generate_cover_letter(resume_text, job_description):
     prompt = f"""
     Write a professional cover letter based on the applicant's resume and the job description.
-    1. Use a strong, natural hook.
-    2. BANNED WORDS: "delve", "testament", "orchestrated", "synergy".
-    3. Output ONLY the cover letter text.
-    
+    Output ONLY the cover letter text.
     Job Description:\n{job_description}\n\nMy Resume:\n{resume_text}
     """
     completion = client.chat.completions.create(
@@ -129,16 +107,27 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     You are an elite Executive Technical Recruiter. I am providing a Draft Resume and Draft Cover Letter. 
 
     Your task is to:
-    1. Critique the drafts using the logic of the XYZ formula (Action + Context + Result).
+    1. Critique the drafts for impact.
     2. REWRITE BOTH documents to incorporate your critique, creating highly professional, natural-sounding final versions.
     
-    CRITICAL INSTRUCTIONS TO AVOID SOUNDING ROBOTIC:
-    - DO NOT literally write phrases like "Accomplished [X] as measured by [Y]". Write the achievements naturally as a human professional would.
-    - DO NOT leave any "(Y)", "(Z)", or "(X)" markers in the text. Remove all structural markers.
-    - Do NOT invent fake metrics. If a metric is needed to strengthen a bullet point, insert a clear placeholder like [Insert Number] or [Insert %].
-    - NEVER wrap your output in ```markdown code blocks. Output the raw text directly.
+    CRITICAL DESIGNER INSTRUCTIONS FOR RESUME FORMAT:
+    You MUST output the resume using this EXACT Markdown structure so my Python code can format it beautifully:
+    
+    # [Candidate Full Name]
+    [City, Country] | [Phone] | [Email] | [LinkedIn]
+    
+    ## PROFESSIONAL SUMMARY
+    [A strong 3-4 sentence paragraph]
+    
+    ## CORE COMPETENCIES
+    - **[Skill Category]:** [Skill 1, Skill 2, Skill 3]
+    
+    ## PROFESSIONAL EXPERIENCE
+    **[Job Title]** | [Company Name] | [Dates]
+    - [Accomplishment 1]
+    - [Accomplishment 2]
 
-    Output your response exactly in this format using these strict delimiters:
+    Output your response exactly in this format using these strict delimiters (NO markdown code blocks):
 
     ===REVIEW===
     (Your concise explanation of the improvements made)
@@ -165,71 +154,135 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     final_resume = resume_match.group(1).strip() if resume_match else draft_resume
     final_cl = cl_match.group(1).strip() if cl_match else draft_cl
     
-    # BRUTE FORCE FIX: Globally strip all code block markers and markdown backticks anywhere in the text
     final_resume = final_resume.replace('```markdown', '').replace('```', '').strip()
     final_cl = final_cl.replace('```markdown', '').replace('```', '').strip()
     
     return review, final_resume, final_cl
 
-# --- Crash-Proof PDF Generators ---
+# --- Designer-Grade PDF Generators ---
+class DesignerPDF(FPDF):
+    def chapter_title(self, title):
+        self.set_font('helvetica', 'B', 12)
+        self.set_text_color(33, 53, 71)
+        self.cell(0, 6, title.upper(), 0, 1, 'L')
+        self.line(self.get_x(), self.get_y(), 210 - self.get_x(), self.get_y())
+        self.ln(3)
+        self.set_text_color(0, 0, 0)
+
+def sanitize_pdf_text(text):
+    replacements = {'•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...'}
+    for search, replace in replacements.items():
+        text = text.replace(search, replace)
+    return text.encode('latin-1', 'ignore').decode('latin-1')
+
 def create_pdf_from_markdown(md_text):
-    safe_md = make_text_safe_for_pdf(md_text)
-    html_content = markdown.markdown(safe_md)
-    
-    pdf = FPDF()
+    pdf = DesignerPDF()
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
-    pdf.set_font("helvetica", size=10)
-    pdf.write_html(html_content)
     
+    lines = md_text.split('\n')
+    for i, line in enumerate(lines):
+        line = sanitize_pdf_text(line.strip())
+        if not line or re.match(r'^[-=*_]{3,}$', line):
+            continue
+            
+        if line.startswith('# '):
+            # Center the Name
+            pdf.set_font("helvetica", "B", 16)
+            pdf.cell(0, 8, line[2:].upper(), 0, 1, 'C')
+        elif i > 0 and lines[i-1].strip().startswith('# '):
+            # Center Contact Info (always follows Name)
+            pdf.set_font("helvetica", "", 10)
+            pdf.cell(0, 5, line, 0, 1, 'C')
+            pdf.ln(4)
+        elif line.startswith('## '):
+            # Formatted Section Header with Line
+            pdf.ln(2)
+            pdf.chapter_title(line[3:])
+        elif line.startswith('- ') or line.startswith('* '):
+            # Clean Bullet Points
+            pdf.set_font("helvetica", "", 10)
+            clean_line = line[2:].replace('**', '') 
+            pdf.multi_cell(0, 5, "-  " + clean_line)
+            pdf.ln(1)
+        elif line.startswith('**') and ' | ' in line:
+            # Job Titles / Subheaders
+            pdf.set_font("helvetica", "B", 11)
+            pdf.cell(0, 6, line.replace('**', ''), 0, 1, 'L')
+        else:
+            pdf.set_font("helvetica", "", 10)
+            clean_line = line.replace('**', '')
+            pdf.multi_cell(0, 5, clean_line)
+            pdf.ln(1)
+            
     return bytes(pdf.output())
 
 def create_pdf_from_text(plain_text):
-    safe_text = make_text_safe_for_pdf(plain_text)
-    
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(20, 20, 20)
-    pdf.set_font("helvetica", size=11)
+    pdf.set_font("helvetica", "", 11)
     
-    for paragraph in safe_text.split('\n'):
-        paragraph = paragraph.strip()
-        # Ignore lines that are just 3 or more dashes
+    for paragraph in plain_text.split('\n'):
+        paragraph = sanitize_pdf_text(paragraph.strip())
         if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
             pdf.multi_cell(0, 6, paragraph)
             pdf.ln(2)
             
     return bytes(pdf.output())
 
-# --- Word (.docx) Generators ---
+# --- Designer-Grade Word (.docx) Generators ---
+def _add_formatted_runs(paragraph, text):
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            paragraph.add_run(part[2:-2]).bold = True
+        else:
+            paragraph.add_run(part)
+
 def create_docx_from_markdown(md_text):
     doc = docx.Document()
     
+    # Set tight margins
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.75)
+        section.right_margin = Inches(0.75)
+
     style = doc.styles['Normal']
     font = style.font
-    font.name = 'Arial'
-    font.size = Pt(10)
+    font.name = 'Calibri'
+    font.size = Pt(11)
     
-    for line in md_text.split('\n'):
+    lines = md_text.split('\n')
+    for i, line in enumerate(lines):
         line = line.strip()
-        # Globally ignore markdown dividers (3 or more dashes/equals/stars)
         if not line or re.match(r'^[-=*_]{3,}$', line):
             continue
             
         if line.startswith('# '):
-            heading = doc.add_heading(line[2:], level=1)
-            heading.runs[0].font.color.rgb = RGBColor(33, 53, 71)
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(line[2:].upper())
+            run.font.size = Pt(16)
+            run.bold = True
+        elif i > 0 and lines[i-1].strip().startswith('# '):
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(line)
+            run.font.size = Pt(10)
         elif line.startswith('## '):
-            heading = doc.add_heading(line[3:], level=2)
+            heading = doc.add_heading(line[3:].upper(), level=2)
             heading.runs[0].font.color.rgb = RGBColor(33, 53, 71)
+            heading.runs[0].font.name = 'Calibri'
         elif line.startswith('- ') or line.startswith('* '):
             p = doc.add_paragraph(style='List Bullet')
-            clean_line = line[2:].replace('**', '')
-            p.add_run(clean_line)
+            _add_formatted_runs(p, line[2:])
         else:
             p = doc.add_paragraph()
-            clean_line = line.replace('**', '')
-            p.add_run(clean_line)
+            _add_formatted_runs(p, line)
             
     bio = io.BytesIO()
     doc.save(bio)
@@ -237,14 +290,21 @@ def create_docx_from_markdown(md_text):
 
 def create_docx_from_text(plain_text):
     doc = docx.Document()
+    
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+
     style = doc.styles['Normal']
     font = style.font
-    font.name = 'Arial'
+    font.name = 'Calibri'
     font.size = Pt(11)
     
     for paragraph in plain_text.split('\n'):
         paragraph = paragraph.strip()
-        # Globally ignore markdown dividers (3 or more dashes/equals/stars)
         if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
             doc.add_paragraph(paragraph)
             
