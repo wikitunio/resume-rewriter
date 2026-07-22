@@ -94,7 +94,7 @@ def optimize_resume(resume_text, job_description):
     """
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt
     )
     return response.text
@@ -120,7 +120,7 @@ def generate_cover_letter(resume_text, job_description):
     """
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt
     )
     return response.text
