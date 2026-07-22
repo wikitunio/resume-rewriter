@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import docx
+from docx.shared import Pt, RGBColor
 import requests
 from bs4 import BeautifulSoup
 from groq import Groq
@@ -19,18 +20,28 @@ except KeyError:
     st.error("Missing GROQ_API_KEY. Please add it to your Streamlit Community Cloud Secrets.")
     st.stop()
 
+# --- Streamlit Session State Initialization ---
+# This prevents the app from wiping data when a download button is clicked
+if 'generation_complete' not in st.session_state:
+    st.session_state.generation_complete = False
+if 'final_resume' not in st.session_state:
+    st.session_state.final_resume = ""
+if 'final_cover_letter' not in st.session_state:
+    st.session_state.final_cover_letter = ""
+if 'review_feedback' not in st.session_state:
+    st.session_state.review_feedback = ""
+if 'new_score' not in st.session_state:
+    st.session_state.new_score = 0.0
+
 # --- Helper Functions ---
-def sanitize_text_for_fpdf(text):
-    """Replaces Unicode characters with FPDF-safe Latin-1 equivalents."""
+def sanitize_text(text):
+    """Replaces Unicode characters with standard equivalents."""
     replacements = {
-        '•': '-', '–': '-', '—': '-',
-        '‘': "'", '’': "'",
-        '“': '"', '”': '"',
-        '…': '...', '✓': 'v'
+        '•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '✓': 'v'
     }
     for search, replace in replacements.items():
         text = text.replace(search, replace)
-    return text.encode('latin-1', 'ignore').decode('latin-1')
+    return text
 
 def extract_text_from_file(uploaded_file):
     text = ""
@@ -76,14 +87,11 @@ def calculate_ats_score(resume_text, job_description):
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Drafts the initial ATS optimized resume."""
     prompt = f"""
-    You are an expert ATS resume writer. 
-    I will provide my current resume and a job description.
+    You are an expert ATS resume writer. Rewrite the provided resume to match the job description.
     STRICT RULES:
-    1. Do not invent any new skills, experiences, or degrees.
-    2. Rewrite my experience bullet points to highlight relevance to the job description.
-    3. Output ONLY the optimized resume in Markdown format. Keep formatting simple.
+    1. Do not invent fake skills or experience.
+    2. Output ONLY the optimized resume in Markdown format. Keep formatting professional and simple.
     
     Job Description:\n{job_description}\n\nMy Resume:\n{resume_text}
     """
@@ -95,10 +103,9 @@ def optimize_resume(resume_text, job_description):
     return completion.choices[0].message.content
 
 def generate_cover_letter(resume_text, job_description):
-    """Drafts the initial human-sounding cover letter."""
     prompt = f"""
-    Write a professional, authentic cover letter based on the applicant's resume and the job description.
-    1. START with a strong, direct hook stating the value the candidate brings.
+    Write a professional cover letter based on the applicant's resume and the job description.
+    1. Use a strong, natural hook.
     2. BANNED WORDS: "delve", "testament", "orchestrated", "synergy".
     3. Output ONLY the cover letter text.
     
@@ -112,32 +119,28 @@ def generate_cover_letter(resume_text, job_description):
     return completion.choices[0].message.content
 
 def finalize_documents(draft_resume, draft_cl, job_description):
-    """Acts as an Expert Recruiter to review, apply XYZ formula, and rewrite the final versions."""
     prompt = f"""
     You are an elite Executive Technical Recruiter. I am providing a Draft Resume and Draft Cover Letter. 
 
     Your task is to:
-    1. Critique the drafts using Google's XYZ formula ("Accomplished [X] as measured by [Y], by doing [Z]").
-    2. REWRITE BOTH documents to incorporate your critique, creating the final, polished, highly logical versions.
-    3. CRITICAL: Do NOT invent fake metrics. If a metric is needed to satisfy the XYZ formula but wasn't in the original text, insert a clear placeholder like [Insert %, e.g., 15%] so the user knows exactly what to manually add.
+    1. Critique the drafts using the logic of the XYZ formula (Action + Context + Result).
+    2. REWRITE BOTH documents to incorporate your critique, creating highly professional, natural-sounding final versions.
+    
+    CRITICAL INSTRUCTIONS TO AVOID SOUNDING ROBOTIC:
+    - DO NOT literally write phrases like "Accomplished [X] as measured by [Y]". Write the achievements naturally as a human professional would.
+    - DO NOT leave any "(Y)", "(Z)", or "(X)" markers in the text. Remove all structural markers.
+    - Do NOT invent fake metrics. If a metric is needed to strengthen a bullet point, insert a clear placeholder like [Insert Number] or [Insert %].
 
-    You MUST output your response exactly in this format using these strict delimiters:
+    Output your response exactly in this format using these strict delimiters:
 
     ===REVIEW===
-    (Your concise explanation of the improvements made and which placeholders the user needs to fill in)
+    (Your concise explanation of the improvements made)
     ===FINAL_RESUME===
     (The finalized markdown resume)
     ===FINAL_COVER_LETTER===
     (The finalized cover letter)
     
-    Job Description:
-    {job_description}
-    
-    Draft Resume:
-    {draft_resume}
-    
-    Draft Cover Letter:
-    {draft_cl}
+    Job Description:\n{job_description}\n\nDraft Resume:\n{draft_resume}\n\nDraft Cover Letter:\n{draft_cl}
     """
     completion = client.chat.completions.create(
         model="openai/gpt-oss-120b",
@@ -147,75 +150,113 @@ def finalize_documents(draft_resume, draft_cl, job_description):
     
     response_text = completion.choices[0].message.content
     
-    # Parse the response using regex to separate the sections based on our delimiters
     review_match = re.search(r'===REVIEW===(.*?)===FINAL_RESUME===', response_text, re.DOTALL)
     resume_match = re.search(r'===FINAL_RESUME===(.*?)===FINAL_COVER_LETTER===', response_text, re.DOTALL)
     cl_match = re.search(r'===FINAL_COVER_LETTER===(.*)', response_text, re.DOTALL)
     
-    review = review_match.group(1).strip() if review_match else "Review parsing failed, but final documents were generated."
+    review = review_match.group(1).strip() if review_match else "Documents generated successfully."
     final_resume = resume_match.group(1).strip() if resume_match else draft_resume
     final_cl = cl_match.group(1).strip() if cl_match else draft_cl
     
     return review, final_resume, final_cl
 
-# --- PDF Generators ---
+# --- PDF Generators (ATS Formatted) ---
 def create_pdf_from_markdown(md_text):
-    clean_md = sanitize_text_for_fpdf(md_text)
-    html_content = markdown.markdown(clean_md)
+    md_text = sanitize_text(md_text).encode('latin-1', 'ignore').decode('latin-1')
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("helvetica", size=11)
-    pdf.write_html(html_content)
-    return bytes(pdf.output())
-
-def create_pdf_from_text(plain_text):
-    clean_text = sanitize_text_for_fpdf(plain_text)
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("helvetica", size=11)
-    pdf.multi_cell(0, 6, clean_text)
-    return bytes(pdf.output())
-
-# --- Word (.docx) Generators ---
-def _add_formatted_runs(paragraph, text):
-    parts = re.split(r'(\*\*.*?\*\*)', text)
-    for part in parts:
-        if part.startswith('**') and part.endswith('**'):
-            paragraph.add_run(part[2:-2]).bold = True
-        else:
-            paragraph.add_run(part)
-
-def create_docx_from_markdown(md_text):
-    doc = docx.Document()
+    pdf.set_margins(15, 15, 15)
+    
     for line in md_text.split('\n'):
         line = line.strip()
         if not line:
+            pdf.ln(3)
+            continue
+            
+        if line.startswith('# '):
+            pdf.set_font("helvetica", "B", 14)
+            pdf.set_text_color(33, 53, 71)
+            pdf.multi_cell(0, 8, line[2:])
+            pdf.set_text_color(0, 0, 0)
+        elif line.startswith('## '):
+            pdf.set_font("helvetica", "B", 12)
+            pdf.set_text_color(33, 53, 71)
+            pdf.multi_cell(0, 7, line[3:])
+            pdf.set_text_color(0, 0, 0)
+            pdf.line(15, pdf.get_y(), 195, pdf.get_y()) # Adds a professional underline
+            pdf.ln(2)
+        elif line.startswith('- ') or line.startswith('* '):
+            pdf.set_font("helvetica", "", 10)
+            clean_line = line[2:].replace('**', '') # Strip bold tags for pure text
+            pdf.multi_cell(0, 5, "- " + clean_line)
+        else:
+            pdf.set_font("helvetica", "", 10)
+            clean_line = line.replace('**', '')
+            pdf.multi_cell(0, 5, clean_line)
+            
+    return bytes(pdf.output())
+
+def create_pdf_from_text(plain_text):
+    plain_text = sanitize_text(plain_text).encode('latin-1', 'ignore').decode('latin-1')
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_margins(20, 20, 20)
+    pdf.set_font("helvetica", "", 11)
+    
+    for paragraph in plain_text.split('\n'):
+        if paragraph.strip():
+            pdf.multi_cell(0, 6, paragraph.strip())
+            pdf.ln(2)
+    return bytes(pdf.output())
+
+# --- Word (.docx) Generators (ATS Formatted) ---
+def create_docx_from_markdown(md_text):
+    doc = docx.Document()
+    
+    # Set default ATS-friendly font to Arial
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Arial'
+    font.size = Pt(10)
+    
+    for line in md_text.split('\n'):
+        line = sanitize_text(line.strip())
+        if not line:
             continue
         if line.startswith('# '):
-            doc.add_heading(line[2:].strip(), level=1)
+            heading = doc.add_heading(line[2:], level=1)
+            heading.runs[0].font.color.rgb = RGBColor(33, 53, 71)
         elif line.startswith('## '):
-            doc.add_heading(line[3:].strip(), level=2)
-        elif line.startswith('### '):
-            doc.add_heading(line[4:].strip(), level=3)
-        elif line.startswith('- ') or line.startswith('* ') or line.startswith('• '):
+            heading = doc.add_heading(line[3:], level=2)
+            heading.runs[0].font.color.rgb = RGBColor(33, 53, 71)
+        elif line.startswith('- ') or line.startswith('* '):
             p = doc.add_paragraph(style='List Bullet')
-            _add_formatted_runs(p, line[2:].strip())
+            clean_line = line[2:].replace('**', '')
+            p.add_run(clean_line)
         else:
             p = doc.add_paragraph()
-            _add_formatted_runs(p, line)
+            clean_line = line.replace('**', '')
+            p.add_run(clean_line)
+            
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
 def create_docx_from_text(plain_text):
     doc = docx.Document()
-    for paragraph in plain_text.split('\n\n'):
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Arial'
+    font.size = Pt(11)
+    
+    plain_text = sanitize_text(plain_text)
+    for paragraph in plain_text.split('\n'):
         if paragraph.strip():
             doc.add_paragraph(paragraph.strip())
+            
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
-
 
 # --- Streamlit Frontend ---
 st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide")
@@ -263,58 +304,66 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
                     draft_cl = generate_cover_letter(raw_resume_text, job_desc)
                 
                 # 2. AI Expert Review & Finalization
-                with st.spinner("Agent 3: Expert AI is applying the XYZ formula and finalizing documents..."):
+                with st.spinner("Agent 3: Expert AI is rewriting documents for natural tone and ATS compliance..."):
                     review_feedback, final_resume, final_cover_letter = finalize_documents(draft_markdown, draft_cl, job_desc)
                 
-                # 3. Calculate Final Score
-                new_score = calculate_ats_score(final_resume, job_desc)
-                st.success(f"Final ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
+                # 3. Save to Session State
+                st.session_state.final_resume = final_resume
+                st.session_state.final_cover_letter = final_cover_letter
+                st.session_state.review_feedback = review_feedback
+                st.session_state.new_score = calculate_ats_score(final_resume, job_desc)
+                st.session_state.original_score = original_score
+                st.session_state.generation_complete = True
                 
-                st.markdown("---")
-                
-                # UI Tabs
-                tab1, tab2, tab3 = st.tabs(["📝 Final Tailored CV", "✉️ Final Cover Letter", "🔎 What The AI Improved"])
-                
-                with tab1:
-                    st.info("💡 **Tip:** Look for bracketed placeholders like `[Insert %]` and manually replace them with real numbers in your downloaded file!")
-                    st.markdown(final_resume)
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.download_button(
-                            label="⬇️ Download CV as PDF",
-                            data=create_pdf_from_markdown(final_resume),
-                            file_name="Optimized_ATS_Resume.pdf",
-                            mime="application/pdf"
-                        )
-                    with col2:
-                        st.download_button(
-                            label="⬇️ Download CV as Word (.docx)",
-                            data=create_docx_from_markdown(final_resume),
-                            file_name="Optimized_ATS_Resume.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                        
-                with tab2:
-                    st.markdown(final_cover_letter)
-                    col3, col4 = st.columns(2)
-                    with col3:
-                        st.download_button(
-                            label="⬇️ Download Cover Letter as PDF",
-                            data=create_pdf_from_text(final_cover_letter),
-                            file_name="Cover_Letter.pdf",
-                            mime="application/pdf"
-                        )
-                    with col4:
-                        st.download_button(
-                            label="⬇️ Download Cover Letter as Word (.docx)",
-                            data=create_docx_from_text(final_cover_letter),
-                            file_name="Cover_Letter.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                
-                with tab3:
-                    st.markdown("### The Expert Recruiter's Notes")
-                    st.markdown(review_feedback)
-                        
             except Exception as e:
                 st.error(f"An error occurred during AI processing: {e}")
+
+# --- Display Results from Session State ---
+# This block runs even after a download button is clicked, preventing UI disappearance
+if st.session_state.generation_complete:
+    st.success(f"Final ATS Match Score: **{st.session_state.new_score}%** (An improvement of {round(st.session_state.new_score - st.session_state.original_score, 2)}%)")
+    
+    st.markdown("---")
+    
+    tab1, tab2, tab3 = st.tabs(["📝 Final Tailored CV", "✉️ Final Cover Letter", "🔎 What The AI Improved"])
+    
+    with tab1:
+        st.info("💡 **Tip:** Look for bracketed placeholders like `[Insert Number]` and manually replace them with real metrics before submitting!")
+        st.markdown(st.session_state.final_resume)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="⬇️ Download CV as PDF",
+                data=create_pdf_from_markdown(st.session_state.final_resume),
+                file_name="Optimized_ATS_Resume.pdf",
+                mime="application/pdf"
+            )
+        with col2:
+            st.download_button(
+                label="⬇️ Download CV as Word (.docx)",
+                data=create_docx_from_markdown(st.session_state.final_resume),
+                file_name="Optimized_ATS_Resume.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            
+    with tab2:
+        st.markdown(st.session_state.final_cover_letter)
+        col3, col4 = st.columns(2)
+        with col3:
+            st.download_button(
+                label="⬇️ Download Cover Letter as PDF",
+                data=create_pdf_from_text(st.session_state.final_cover_letter),
+                file_name="Cover_Letter.pdf",
+                mime="application/pdf"
+            )
+        with col4:
+            st.download_button(
+                label="⬇️ Download Cover Letter as Word (.docx)",
+                data=create_docx_from_text(st.session_state.final_cover_letter),
+                file_name="Cover_Letter.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+    
+    with tab3:
+        st.markdown("### The Expert Recruiter's Notes")
+        st.markdown(st.session_state.review_feedback)
