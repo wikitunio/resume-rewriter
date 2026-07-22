@@ -8,6 +8,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import markdown
 from fpdf import FPDF
+import time
 
 # --- Initialize Gemini Client ---
 try:
@@ -18,6 +19,22 @@ except KeyError:
     st.stop()
 
 # --- Helper Functions ---
+def generate_with_retry(prompt, model_name="gemini-2.0-flash", retries=3):
+    """Wraps the API call with an automatic retry mechanism for 429 limits."""
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            if "429" in str(e) and attempt < retries - 1:
+                st.warning(f"⚠️ Google API Free Tier limit hit. Cooling down for 35 seconds... (Attempt {attempt + 1}/{retries})")
+                time.sleep(35)
+            else:
+                raise e
+
 def extract_text_from_file(uploaded_file):
     """Extracts text from PDF, DOCX, or TXT files."""
     text = ""
@@ -74,7 +91,7 @@ def calculate_ats_score(resume_text, job_description):
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Sends the data to the free Gemini API for intelligent CV rewriting."""
+    """Sends the data to the API using the retry logic."""
     prompt = f"""
     You are an expert ATS resume writer. 
     I will provide my current resume and a job description.
@@ -92,15 +109,10 @@ def optimize_resume(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
-    )
-    return response.text
+    return generate_with_retry(prompt)
 
 def generate_cover_letter(resume_text, job_description):
-    """Generates a highly natural, human-sounding cover letter."""
+    """Generates the cover letter using the retry logic."""
     prompt = f"""
     Write a professional, authentic, and highly human-sounding cover letter based on the applicant's resume and the job description.
     
@@ -118,12 +130,7 @@ def generate_cover_letter(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
-    )
-    return response.text
+    return generate_with_retry(prompt)
 
 def create_pdf_from_markdown(md_text):
     """Converts simple Markdown to PDF using fpdf2."""
@@ -142,7 +149,6 @@ def create_pdf_from_text(plain_text):
     pdf.add_page()
     pdf.set_font("helvetica", size=11)
     
-    # Replace non-latin-1 characters that might crash fpdf
     clean_text = plain_text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 6, clean_text)
     
@@ -154,7 +160,6 @@ st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide"
 st.title("CV Optimizer & Cover Letter Generator")
 st.markdown("Powered by the free **Gemini API**")
 
-# Input options for Job Description
 option = st.radio("Choose Job Description Input Method:", ["Paste Job Description Text", "Paste Job Posting Link (URL)"])
 
 job_desc = ""
@@ -188,40 +193,45 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
             original_score = calculate_ats_score(raw_resume_text, job_desc)
             st.info(f"Baseline ATS Match Score: **{original_score}%**")
             
-            with st.spinner("AI is analyzing keywords, rewriting CV, and drafting your Cover Letter..."):
-                try:
-                    # 2. AI Generation
+            try:
+                # 2. AI Generation - Resume
+                with st.spinner("AI is analyzing keywords and rewriting your CV..."):
                     optimized_markdown = optimize_resume(raw_resume_text, job_desc)
-                    cover_letter_text = generate_cover_letter(raw_resume_text, job_desc)
-                    
-                    # 3. New Score
                     new_score = calculate_ats_score(optimized_markdown, job_desc)
                     st.success(f"New ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
+                
+                # Intentional Pause to prevent 429 Rate Limit
+                st.info("⏳ Pausing for 15 seconds to respect Google's free tier limits before drafting the cover letter...")
+                time.sleep(15)
+                
+                # 3. AI Generation - Cover Letter
+                with st.spinner("Drafting your Cover Letter..."):
+                    cover_letter_text = generate_cover_letter(raw_resume_text, job_desc)
+                
+                st.markdown("---")
+                
+                # 4. Display in Tabs
+                tab1, tab2 = st.tabs(["📝 Tailored CV", "✉️ Professional Cover Letter"])
+                
+                with tab1:
+                    st.markdown(optimized_markdown)
+                    pdf_cv = create_pdf_from_markdown(optimized_markdown)
+                    st.download_button(
+                        label="⬇️ Download Optimized CV as PDF",
+                        data=pdf_cv,
+                        file_name="Optimized_ATS_Resume.pdf",
+                        mime="application/pdf"
+                    )
                     
-                    st.markdown("---")
+                with tab2:
+                    st.markdown(cover_letter_text)
+                    pdf_cl = create_pdf_from_text(cover_letter_text)
+                    st.download_button(
+                        label="⬇️ Download Cover Letter as PDF",
+                        data=pdf_cl,
+                        file_name="Cover_Letter.pdf",
+                        mime="application/pdf"
+                    )
                     
-                    # 4. Display in Tabs for better UI
-                    tab1, tab2 = st.tabs(["📝 Tailored CV", "✉️ Professional Cover Letter"])
-                    
-                    with tab1:
-                        st.markdown(optimized_markdown)
-                        pdf_cv = create_pdf_from_markdown(optimized_markdown)
-                        st.download_button(
-                            label="⬇️ Download Optimized CV as PDF",
-                            data=pdf_cv,
-                            file_name="Optimized_ATS_Resume.pdf",
-                            mime="application/pdf"
-                        )
-                        
-                    with tab2:
-                        st.markdown(cover_letter_text)
-                        pdf_cl = create_pdf_from_text(cover_letter_text)
-                        st.download_button(
-                            label="⬇️ Download Cover Letter as PDF",
-                            data=pdf_cl,
-                            file_name="Cover_Letter.pdf",
-                            mime="application/pdf"
-                        )
-                        
-                except Exception as e:
-                    st.error(f"An error occurred during AI processing: {e}")
+            except Exception as e:
+                st.error(f"An error occurred during AI processing: {e}")
