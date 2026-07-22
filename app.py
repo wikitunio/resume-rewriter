@@ -33,6 +33,16 @@ if 'new_score' not in st.session_state:
     st.session_state.new_score = 0.0
 
 # --- Helper Functions ---
+def sanitize_text(text):
+    """Replaces Unicode characters (like non-breaking hyphens) with standard equivalents to prevent squished words."""
+    replacements = {
+        '•': '-', '–': '-', '—': '-', '‑': '-', '−': '-', # Catches all weird hyphens
+        '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '✓': 'v'
+    }
+    for search, replace in replacements.items():
+        text = text.replace(search, replace)
+    return text.encode('latin-1', 'ignore').decode('latin-1')
+
 def extract_text_from_file(uploaded_file):
     text = ""
     file_extension = uploaded_file.name.split('.')[-1].lower()
@@ -169,12 +179,6 @@ class DesignerPDF(FPDF):
         self.ln(3)
         self.set_text_color(0, 0, 0)
 
-def sanitize_pdf_text(text):
-    replacements = {'•': '-', '–': '-', '—': '-', '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...'}
-    for search, replace in replacements.items():
-        text = text.replace(search, replace)
-    return text.encode('latin-1', 'ignore').decode('latin-1')
-
 def create_pdf_from_markdown(md_text):
     pdf = DesignerPDF()
     pdf.add_page()
@@ -182,31 +186,26 @@ def create_pdf_from_markdown(md_text):
     
     lines = md_text.split('\n')
     for i, line in enumerate(lines):
-        line = sanitize_pdf_text(line.strip())
+        line = sanitize_text(line.strip())
         if not line or re.match(r'^[-=*_]{3,}$', line):
             continue
             
         if line.startswith('# '):
-            # Center the Name
             pdf.set_font("helvetica", "B", 16)
             pdf.cell(0, 8, line[2:].upper(), 0, 1, 'C')
         elif i > 0 and lines[i-1].strip().startswith('# '):
-            # Center Contact Info (always follows Name)
             pdf.set_font("helvetica", "", 10)
             pdf.cell(0, 5, line, 0, 1, 'C')
             pdf.ln(4)
         elif line.startswith('## '):
-            # Formatted Section Header with Line
             pdf.ln(2)
             pdf.chapter_title(line[3:])
         elif line.startswith('- ') or line.startswith('* '):
-            # Clean Bullet Points
             pdf.set_font("helvetica", "", 10)
             clean_line = line[2:].replace('**', '') 
             pdf.multi_cell(0, 5, "-  " + clean_line)
             pdf.ln(1)
         elif line.startswith('**') and ' | ' in line:
-            # Job Titles / Subheaders
             pdf.set_font("helvetica", "B", 11)
             pdf.cell(0, 6, line.replace('**', ''), 0, 1, 'L')
         else:
@@ -224,7 +223,8 @@ def create_pdf_from_text(plain_text):
     pdf.set_font("helvetica", "", 11)
     
     for paragraph in plain_text.split('\n'):
-        paragraph = sanitize_pdf_text(paragraph.strip())
+        paragraph = sanitize_text(paragraph.strip())
+        paragraph = paragraph.replace('**', '') # Strip bold asterisks for clean PDF output
         if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
             pdf.multi_cell(0, 6, paragraph)
             pdf.ln(2)
@@ -243,7 +243,9 @@ def _add_formatted_runs(paragraph, text):
 def create_docx_from_markdown(md_text):
     doc = docx.Document()
     
-    # Set tight margins
+    # Overwrite python-docx default author metadata
+    doc.core_properties.author = "Waqar Ahmed Tunio"
+    
     sections = doc.sections
     for section in sections:
         section.top_margin = Inches(0.5)
@@ -279,10 +281,10 @@ def create_docx_from_markdown(md_text):
             heading.runs[0].font.name = 'Calibri'
         elif line.startswith('- ') or line.startswith('* '):
             p = doc.add_paragraph(style='List Bullet')
-            _add_formatted_runs(p, line[2:])
+            _add_formatted_runs(p, sanitize_text(line[2:]))
         else:
             p = doc.add_paragraph()
-            _add_formatted_runs(p, line)
+            _add_formatted_runs(p, sanitize_text(line))
             
     bio = io.BytesIO()
     doc.save(bio)
@@ -290,6 +292,9 @@ def create_docx_from_markdown(md_text):
 
 def create_docx_from_text(plain_text):
     doc = docx.Document()
+    
+    # Overwrite python-docx default author metadata
+    doc.core_properties.author = "Waqar Ahmed Tunio"
     
     sections = doc.sections
     for section in sections:
@@ -306,7 +311,8 @@ def create_docx_from_text(plain_text):
     for paragraph in plain_text.split('\n'):
         paragraph = paragraph.strip()
         if paragraph and not re.match(r'^[-=*_]{3,}$', paragraph):
-            doc.add_paragraph(paragraph)
+            p = doc.add_paragraph()
+            _add_formatted_runs(p, sanitize_text(paragraph)) # Enables bolding in cover letter
             
     bio = io.BytesIO()
     doc.save(bio)
