@@ -74,7 +74,7 @@ def calculate_ats_score(resume_text, job_description):
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Sends the data to Groq's Llama 3 model for intelligent CV rewriting."""
+    """Sends the data to the newly recommended Groq model for intelligent CV rewriting."""
     prompt = f"""
     You are an expert ATS resume writer. 
     I will provide my current resume and a job description.
@@ -94,7 +94,7 @@ def optimize_resume(resume_text, job_description):
     """
     
     completion = client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5,
     )
@@ -121,7 +121,7 @@ def generate_cover_letter(resume_text, job_description):
     """
     
     completion = client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
     )
@@ -153,7 +153,7 @@ def create_pdf_from_text(plain_text):
 st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide")
 
 st.title("CV Optimizer & Cover Letter Generator")
-st.markdown("Powered by the ultra-fast **Groq API (Llama 3)**")
+st.markdown("Powered by the ultra-fast **Groq API**")
 
 option = st.radio("Choose Job Description Input Method:", ["Paste Job Description Text", "Paste Job Posting Link (URL)"])
 
@@ -190,7 +190,7 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
             
             try:
                 # 2. AI Generation - Resume
-                with st.spinner("Llama 3 is analyzing keywords and rewriting your CV..."):
+                with st.spinner("AI is analyzing keywords and rewriting your CV..."):
                     optimized_markdown = optimize_resume(raw_resume_text, job_desc)
                     new_score = calculate_ats_score(optimized_markdown, job_desc)
                     st.success(f"New ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
