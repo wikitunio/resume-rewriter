@@ -3,38 +3,21 @@ import pdfplumber
 import docx
 import requests
 from bs4 import BeautifulSoup
-from google import genai
+from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import markdown
 from fpdf import FPDF
-import time
 
-# --- Initialize Gemini Client ---
+# --- Initialize Groq Client ---
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    client = genai.Client(api_key=api_key)
+    api_key = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=api_key)
 except KeyError:
-    st.error("Missing GEMINI_API_KEY. Please add it to your Streamlit Community Cloud Secrets.")
+    st.error("Missing GROQ_API_KEY. Please add it to your Streamlit Community Cloud Secrets.")
     st.stop()
 
 # --- Helper Functions ---
-def generate_with_retry(prompt, model_name="gemini-2.0-flash", retries=3):
-    """Wraps the API call with an automatic retry mechanism for 429 limits."""
-    for attempt in range(retries):
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            if "429" in str(e) and attempt < retries - 1:
-                st.warning(f"⚠️ Google API Free Tier limit hit. Cooling down for 35 seconds... (Attempt {attempt + 1}/{retries})")
-                time.sleep(35)
-            else:
-                raise e
-
 def extract_text_from_file(uploaded_file):
     """Extracts text from PDF, DOCX, or TXT files."""
     text = ""
@@ -91,7 +74,7 @@ def calculate_ats_score(resume_text, job_description):
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Sends the data to the API using the retry logic."""
+    """Sends the data to Groq's Llama 3 model for intelligent CV rewriting."""
     prompt = f"""
     You are an expert ATS resume writer. 
     I will provide my current resume and a job description.
@@ -101,7 +84,7 @@ def optimize_resume(resume_text, job_description):
     2. Rewrite my experience bullet points to highlight relevance to the job description using the Action + Context + Result format.
     3. Weave in matching keywords from the job description naturally.
     4. Output ONLY the optimized resume in Markdown format.
-    5. KEEP FORMATTING SIMPLE: Only use headings, bullet points, and bold text.
+    5. KEEP FORMATTING SIMPLE: Only use headings, bullet points, and bold text. Do not include any introductory chat text.
     
     Job Description:
     {job_description}
@@ -109,10 +92,16 @@ def optimize_resume(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    return generate_with_retry(prompt)
+    
+    completion = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+    )
+    return completion.choices[0].message.content
 
 def generate_cover_letter(resume_text, job_description):
-    """Generates the cover letter using the retry logic."""
+    """Generates a highly natural, human-sounding cover letter via Groq."""
     prompt = f"""
     Write a professional, authentic, and highly human-sounding cover letter based on the applicant's resume and the job description.
     
@@ -122,7 +111,7 @@ def generate_cover_letter(resume_text, job_description):
     3. BANNED WORDS: Do not use words like "delve", "testament", "orchestrated", "synergy", "pivotal", "embark", or "furthermore". Keep the vocabulary natural and conversational but professional.
     4. Show, don't just tell. Connect 1 or 2 specific achievements from the resume directly to the needs of the job.
     5. Keep it concise (max 3-4 short paragraphs).
-    6. Output ONLY the cover letter text. Include standard [Insert Name/Date/Company] brackets if specific info is missing.
+    6. Output ONLY the cover letter text. Include standard [Insert Name/Date/Company] brackets if specific info is missing. Do not include any introductory chat text.
     
     Job Description:
     {job_description}
@@ -130,7 +119,13 @@ def generate_cover_letter(resume_text, job_description):
     My Resume:
     {resume_text}
     """
-    return generate_with_retry(prompt)
+    
+    completion = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6,
+    )
+    return completion.choices[0].message.content
 
 def create_pdf_from_markdown(md_text):
     """Converts simple Markdown to PDF using fpdf2."""
@@ -158,7 +153,7 @@ def create_pdf_from_text(plain_text):
 st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide")
 
 st.title("CV Optimizer & Cover Letter Generator")
-st.markdown("Powered by the free **Gemini API**")
+st.markdown("Powered by the ultra-fast **Groq API (Llama 3)**")
 
 option = st.radio("Choose Job Description Input Method:", ["Paste Job Description Text", "Paste Job Posting Link (URL)"])
 
@@ -195,14 +190,10 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
             
             try:
                 # 2. AI Generation - Resume
-                with st.spinner("AI is analyzing keywords and rewriting your CV..."):
+                with st.spinner("Llama 3 is analyzing keywords and rewriting your CV..."):
                     optimized_markdown = optimize_resume(raw_resume_text, job_desc)
                     new_score = calculate_ats_score(optimized_markdown, job_desc)
                     st.success(f"New ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
-                
-                # Intentional Pause to prevent 429 Rate Limit
-                st.info("⏳ Pausing for 15 seconds to respect Google's free tier limits before drafting the cover letter...")
-                time.sleep(15)
                 
                 # 3. AI Generation - Cover Letter
                 with st.spinner("Drafting your Cover Letter..."):
