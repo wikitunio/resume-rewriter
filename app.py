@@ -8,7 +8,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import markdown
 from fpdf import FPDF
-import io
 
 # --- Initialize Gemini Client ---
 try:
@@ -95,7 +94,7 @@ def optimize_resume(resume_text, job_description):
     """
     
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt
     )
     return response.text
@@ -121,7 +120,7 @@ def generate_cover_letter(resume_text, job_description):
     """
     
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt
     )
     return response.text
@@ -142,9 +141,11 @@ def create_pdf_from_text(plain_text):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("helvetica", size=11)
+    
     # Replace non-latin-1 characters that might crash fpdf
     clean_text = plain_text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 6, clean_text)
+    
     return bytes(pdf.output())
 
 # --- Streamlit Frontend ---
@@ -213,7 +214,7 @@ if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
                         )
                         
                     with tab2:
-                        st.markdown(f"*{cover_letter_text}*")
+                        st.markdown(cover_letter_text)
                         pdf_cl = create_pdf_from_text(cover_letter_text)
                         st.download_button(
                             label="⬇️ Download Cover Letter as PDF",
