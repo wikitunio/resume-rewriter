@@ -1,7 +1,7 @@
 streamlit
 pdfplumber
 scikit-learn
-google-genai
+groq
 markdown
 fpdf2
 requests
