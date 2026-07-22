@@ -1,14 +1,16 @@
 import streamlit as st
 import pdfplumber
-import tempfile
-import os
+import docx
+import requests
+from bs4 import BeautifulSoup
 from google import genai
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from markdown_pdf import MarkdownPdf, Section
+import markdown
+from fpdf import FPDF
+import io
 
 # --- Initialize Gemini Client ---
-# Streamlit Cloud reads this automatically from your Advanced Settings Secrets
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
@@ -17,15 +19,50 @@ except KeyError:
     st.stop()
 
 # --- Helper Functions ---
-def extract_text_from_pdf(pdf_file):
-    """Extracts raw text from the uploaded PDF CV."""
+def extract_text_from_file(uploaded_file):
+    """Extracts text from PDF, DOCX, or TXT files."""
     text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    
+    try:
+        if file_extension == 'pdf':
+            with pdfplumber.open(uploaded_file) as pdf:
+                for page in pdf.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
+        elif file_extension == 'docx':
+            doc = docx.Document(uploaded_file)
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+        elif file_extension == 'txt':
+            text = uploaded_file.read().decode('utf-8')
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        
     return text
+
+def scrape_job_description(url):
+    """Fetches and cleans visible text from a job posting URL."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        for element in soup(["script", "style", "header", "footer", "nav", "noscript", "svg"]):
+            element.decompose()
+            
+        text = soup.get_text(separator="\n")
+        lines = (line.strip() for line in text.splitlines())
+        clean_text = "\n".join(chunk for chunk in lines if chunk)
+        
+        return clean_text
+    except Exception as e:
+        st.error(f"Failed to extract job description from URL: {e}")
+        return None
 
 def calculate_ats_score(resume_text, job_description):
     """Calculates a Cosine Similarity percentage between the CV and Job Description."""
@@ -33,14 +70,12 @@ def calculate_ats_score(resume_text, job_description):
         return 0.0
         
     vectorizer = TfidfVectorizer(stop_words='english')
-    # Convert text to numerical vectors
     vectors = vectorizer.fit_transform([resume_text, job_description])
-    # Calculate similarity math
     similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
     return round(similarity * 100, 2)
 
 def optimize_resume(resume_text, job_description):
-    """Sends the data to the free Gemini API for intelligent rewriting."""
+    """Sends the data to the free Gemini API for intelligent CV rewriting."""
     prompt = f"""
     You are an expert ATS resume writer. 
     I will provide my current resume and a job description.
@@ -49,7 +84,8 @@ def optimize_resume(resume_text, job_description):
     1. Do not invent any new skills, experiences, or degrees.
     2. Rewrite my experience bullet points to highlight relevance to the job description using the Action + Context + Result format.
     3. Weave in matching keywords from the job description naturally.
-    4. Output ONLY the optimized resume in Markdown format. Do not include introductory text like "Here is your resume".
+    4. Output ONLY the optimized resume in Markdown format.
+    5. KEEP FORMATTING SIMPLE: Only use headings, bullet points, and bold text.
     
     Job Description:
     {job_description}
@@ -58,7 +94,32 @@ def optimize_resume(resume_text, job_description):
     {resume_text}
     """
     
-    # Using gemini-1.5-flash which is fast, capable, and strictly available on the free tier
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=prompt
+    )
+    return response.text
+
+def generate_cover_letter(resume_text, job_description):
+    """Generates a highly natural, human-sounding cover letter."""
+    prompt = f"""
+    Write a professional, authentic, and highly human-sounding cover letter based on the applicant's resume and the job description.
+    
+    CRITICAL INSTRUCTIONS TO AVOID SOUNDING LIKE AI:
+    1. DO NOT use generic, robotic openings like "I am writing to express my interest in..." or "I am thrilled to apply for..."
+    2. START with a strong, direct hook that immediately states the value the candidate brings to a specific problem or need mentioned in the job description.
+    3. BANNED WORDS: Do not use words like "delve", "testament", "orchestrated", "synergy", "pivotal", "embark", or "furthermore". Keep the vocabulary natural and conversational but professional.
+    4. Show, don't just tell. Connect 1 or 2 specific achievements from the resume directly to the needs of the job.
+    5. Keep it concise (max 3-4 short paragraphs).
+    6. Output ONLY the cover letter text. Include standard [Insert Name/Date/Company] brackets if specific info is missing.
+    
+    Job Description:
+    {job_description}
+    
+    My Resume:
+    {resume_text}
+    """
+    
     response = client.models.generate_content(
         model="gemini-1.5-flash",
         contents=prompt
@@ -66,74 +127,100 @@ def optimize_resume(resume_text, job_description):
     return response.text
 
 def create_pdf_from_markdown(md_text):
-    """Converts Markdown text to PDF using a pure Python library and temp files for safety."""
-    pdf = MarkdownPdf(toc_level=0)
-    pdf.add_section(Section(md_text, toc=False))
+    """Converts simple Markdown to PDF using fpdf2."""
+    html_content = markdown.markdown(md_text)
     
-    # Create a temporary file to save the PDF
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp_path = tmp.name
-        
-    # Save the PDF to the temporary physical path
-    pdf.save(tmp_path)
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("helvetica", size=11)
     
-    # Read the bytes back into memory for Streamlit's download button
-    with open(tmp_path, "rb") as f:
-        pdf_bytes = f.read()
-        
-    # Clean up the temporary file so we don't clutter the server
-    os.remove(tmp_path)
-    
-    return pdf_bytes
+    pdf.write_html(html_content)
+    return bytes(pdf.output())
 
+def create_pdf_from_text(plain_text):
+    """Creates a basic PDF for the cover letter."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("helvetica", size=11)
+    # Replace non-latin-1 characters that might crash fpdf
+    clean_text = plain_text.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 6, clean_text)
+    return bytes(pdf.output())
 
 # --- Streamlit Frontend ---
-st.set_page_config(page_title="AI CV Optimizer", page_icon="📄")
+st.set_page_config(page_title="AI CV Optimizer", page_icon="📄", layout="wide")
 
-st.title("CV Optimizer (ATS Matcher)")
+st.title("CV Optimizer & Cover Letter Generator")
 st.markdown("Powered by the free **Gemini API**")
 
-job_desc = st.text_area("Paste the Target Job Description here:", height=200)
-uploaded_cv = st.file_uploader("Upload your current CV (PDF format)", type="pdf")
+# Input options for Job Description
+option = st.radio("Choose Job Description Input Method:", ["Paste Job Description Text", "Paste Job Posting Link (URL)"])
 
-if st.button("Optimize My CV", type="primary"):
+job_desc = ""
+
+if option == "Paste Job Description Text":
+    job_desc = st.text_area("Paste Target Job Description:", height=150)
+else:
+    job_url = st.text_input("Paste Job Posting URL (e.g., https://...):")
+    if job_url:
+        with st.spinner("Scraping job description from URL..."):
+            scraped_text = scrape_job_description(job_url)
+            if scraped_text:
+                job_desc = scraped_text
+                st.success("Successfully retrieved job description from URL!")
+                with st.expander("Preview Extracted Job Text"):
+                    st.text(job_desc[:800] + "..." if len(job_desc) > 800 else job_desc)
+
+uploaded_cv = st.file_uploader("Upload your current CV (.pdf, .docx, or .txt)", type=["pdf", "docx", "txt"])
+
+if st.button("Optimize My CV & Generate Cover Letter", type="primary"):
     if not uploaded_cv or not job_desc:
-        st.warning("Please upload a CV and paste a Job Description first.")
+        st.warning("Please upload a CV and provide a Job Description/URL first.")
     else:
-        with st.spinner("Extracting text from your PDF..."):
-            raw_resume_text = extract_text_from_pdf(uploaded_cv)
+        with st.spinner(f"Extracting text from {uploaded_cv.name}..."):
+            raw_resume_text = extract_text_from_file(uploaded_cv)
             
         if not raw_resume_text.strip():
-            st.error("Could not extract text from this PDF. It might be an image rather than text.")
+            st.error("Could not extract text from this file. It might be an empty file or a scanned image.")
         else:
             # 1. Baseline Score
             original_score = calculate_ats_score(raw_resume_text, job_desc)
             st.info(f"Baseline ATS Match Score: **{original_score}%**")
             
-            with st.spinner("Analyzing keywords and rewriting CV via AI..."):
+            with st.spinner("AI is analyzing keywords, rewriting CV, and drafting your Cover Letter..."):
                 try:
-                    # 2. AI Optimization
+                    # 2. AI Generation
                     optimized_markdown = optimize_resume(raw_resume_text, job_desc)
+                    cover_letter_text = generate_cover_letter(raw_resume_text, job_desc)
                     
                     # 3. New Score
                     new_score = calculate_ats_score(optimized_markdown, job_desc)
                     st.success(f"New ATS Match Score: **{new_score}%** (An improvement of {round(new_score - original_score, 2)}%)")
                     
                     st.markdown("---")
-                    st.markdown("### Your Tailored CV")
-                    st.markdown(optimized_markdown)
-                    st.markdown("---")
                     
-                    # 4. PDF Generation
-                    with st.spinner("Generating downloadable PDF..."):
-                        pdf_file = create_pdf_from_markdown(optimized_markdown)
+                    # 4. Display in Tabs for better UI
+                    tab1, tab2 = st.tabs(["📝 Tailored CV", "✉️ Professional Cover Letter"])
                     
-                    # 5. Download Button
-                    st.download_button(
-                        label="⬇️ Download Optimized CV as PDF",
-                        data=pdf_file,
-                        file_name="Optimized_ATS_Resume.pdf",
-                        mime="application/pdf"
-                    )
+                    with tab1:
+                        st.markdown(optimized_markdown)
+                        pdf_cv = create_pdf_from_markdown(optimized_markdown)
+                        st.download_button(
+                            label="⬇️ Download Optimized CV as PDF",
+                            data=pdf_cv,
+                            file_name="Optimized_ATS_Resume.pdf",
+                            mime="application/pdf"
+                        )
+                        
+                    with tab2:
+                        st.markdown(f"*{cover_letter_text}*")
+                        pdf_cl = create_pdf_from_text(cover_letter_text)
+                        st.download_button(
+                            label="⬇️ Download Cover Letter as PDF",
+                            data=pdf_cl,
+                            file_name="Cover_Letter.pdf",
+                            mime="application/pdf"
+                        )
+                        
                 except Exception as e:
                     st.error(f"An error occurred during AI processing: {e}")
