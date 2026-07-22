@@ -2,6 +2,4 @@ streamlit
 pdfplumber
 scikit-learn
 google-genai
-
-markdown
-pdfkit
+markdown-pdf
